@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and attest
+    # Both the caller and the reusable workflow need these permissions.
+    permissions:
+      contents: read
+      id-token: write # lets the trusted builder request a Sigstore signing certificate
+      attestations: write # lets the trusted builder store the attestation on GitHub
+    uses: $/.github/workflows/build-attest.yml
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+      attestations: read # verify the provenance before publishing
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Download Sigstore bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: provenance
+          path: provenance
+
+      - name: Verify files against the signed provenance
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SUBJECTS: ${{ needs.build.outputs.subjects }}
+        run: |
+          # Publish exactly the attested files, unmodified...
+          base64 -d <<< "$SUBJECTS" | sha256sum --check --strict -
+          diff <(base64 -d <<< "$SUBJECTS" | awk '{print $2}' | sort) <(printf '%s\n' * | sort)
+          # ...and only if each one verifies against provenance signed by the trusted builder.
+          for file in *; do
+            gh attestation verify "$file" --repo "$REPO" \
+              --signer-workflow "$REPO/.github/workflows/build-attest.yml" \
+              --source-ref "$REF" --deny-self-hosted-runners
+          done
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --generate-notes dist/* provenance/*
