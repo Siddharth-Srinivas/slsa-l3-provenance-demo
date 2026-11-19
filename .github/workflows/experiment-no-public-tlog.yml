@@ -1,0 +1,87 @@
+name: "Experiment: attest without the public transparency log"
+
+# Throwaway experiment: can attestations for this public repository be signed
+# without the Sigstore public-good instance (and its public Rekor log)?
+on:
+  push:
+    branches: [experiment/no-public-tlog]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  action-private-signing:
+    name: "A: actions/attest with private-signing"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # request a signing certificate
+      attestations: write # the action always stores the attestation on GitHub
+    steps:
+      - name: Create subject
+        run: |
+          mkdir out
+          echo "no-public-tlog experiment ${GITHUB_SHA} (A: action)" > out/subject-action.txt
+
+      - name: Attest with the undocumented private-signing input
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/subject-action.txt
+          private-signing: true
+
+      - name: Save bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+        run: |
+          cp "$BUNDLE_PATH" out/subject-action.sigstore.json
+          echo "attestation-id=$ATTESTATION_ID"
+
+      - name: Upload result
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: a-action-private-signing
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  toolkit-skip-write:
+    name: "B: @actions/attest toolkit, GitHub instance, skipWrite"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No attestations permission: this job cannot store anything on GitHub.
+    permissions:
+      contents: read
+      id-token: write # request a signing certificate
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install @actions/attest
+        working-directory: .github/experiment
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund @actions/attest@3.2.0
+
+      - name: Create subject
+        run: |
+          mkdir out
+          echo "no-public-tlog experiment ${GITHUB_SHA} (B: toolkit)" > out/subject-toolkit.txt
+
+      - name: Sign and save the bundle locally only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/experiment/sign-skip-write.mjs out/subject-toolkit.txt out/subject-toolkit.sigstore.json
+
+      - name: Upload result
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: b-toolkit-skip-write
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
